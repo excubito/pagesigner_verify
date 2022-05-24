@@ -1,0 +1,14 @@
+[package]
+edition = "2021"
+name = "pagesigner_verify"
+version = "0.1.0"
+[dependencies]
+base64 = "*"
+chrono = "*"
+serde = "*"
+serde_derive = "*"
+serde_json = "*"
+wasm-bindgen = "*"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
