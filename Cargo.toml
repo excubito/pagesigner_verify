@@ -5,10 +5,19 @@ version = "0.1.0"
 [dependencies]
 base64 = "*"
 chrono = "*"
+num-bigint = "*"
+pem = "*"
+ring = "*"
 serde = "*"
 serde_derive = "*"
 serde_json = "*"
 wasm-bindgen = "*"
+
+[dependencies.webpki]
+features = ["alloc"]
+version = "*"
+
+[features]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
