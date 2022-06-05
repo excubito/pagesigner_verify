@@ -5,13 +5,21 @@ version = "0.1.0"
 [dependencies]
 base64 = "*"
 chrono = "*"
+hex = "*"
+hmac = "*"
+lazy_static = "*"
 num-bigint = "*"
 pem = "*"
+regex = "*"
 ring = "*"
 serde = "*"
 serde_derive = "*"
 serde_json = "*"
+sha2 = "*"
+sxd-document = "*"
+sxd-xpath = "*"
 wasm-bindgen = "*"
+xmltree = "*"
 
 [dependencies.webpki]
 features = ["alloc"]

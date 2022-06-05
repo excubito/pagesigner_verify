@@ -1,12 +1,18 @@
-use chrono::prelude::DateTime;
-use chrono::Utc;
 use num_bigint::*;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
-use std::time::{Duration, UNIX_EPOCH};
-
 use webpki::*;
+mod oracles;
 type BaseType = Vec<u8>;
+
+pub type SecureEnclaveAttestation = Vec<ReqResp>;
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReqResp {
+    pub request: String,
+    pub response: String,
+}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,14 +70,20 @@ pub struct PageSignerAttestation {
 }
 
 pub struct PageSignerVerificationContext {
-    attestation: PageSignerAttestation,
+    att: PageSignerAttestation,
+    sev_att: SecureEnclaveAttestation,
     cert_root: Vec<pem::Pem>,
 }
 
 impl PageSignerVerificationContext {
-    pub fn new(attestation: PageSignerAttestation, cert_root: Vec<pem::Pem>) -> Self {
+    pub fn new(
+        att: PageSignerAttestation,
+        sev_att: SecureEnclaveAttestation,
+        cert_root: Vec<pem::Pem>,
+    ) -> Self {
         Self {
-            attestation,
+            att,
+            sev_att,
             cert_root,
         }
     }
@@ -89,7 +101,8 @@ mod base64 {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let base64 = String::deserialize(d)?;
-        base64::decode(base64.as_bytes()).map_err(|e| serde::de::Error::custom(e))
+        base64::decode_config(base64.as_bytes(), base64::STANDARD_NO_PAD)
+            .map_err(|e| serde::de::Error::custom(e))
     }
 }
 
@@ -155,29 +168,14 @@ mod base64_vec {
     }
 }
 
-type VerificationResult<'a> = Result<&'a PageSignerVerificationContext, String>;
-fn verifyNotary(ctx: &PageSignerVerificationContext) -> VerificationResult {
-    todo!();
-}
-
-fn verifySessionSignatures(ctx: &PageSignerVerificationContext) -> VerificationResult {
-    todo!();
-}
-
-fn verifyHTTPHeaders(ctx: &PageSignerVerificationContext) -> VerificationResult {
-    todo!();
-}
-
-fn verifyServerAuthTags(ctx: &PageSignerVerificationContext) -> VerificationResult {
-    todo!();
-}
+pub type VerificationResult<'a> = Result<&'a PageSignerVerificationContext, String>;
 
 const PG_SG_TITLE: &str = "PageSigner notarization file";
-fn checkVersionAndTitle(ctx: &PageSignerVerificationContext) -> VerificationResult {
-    if ctx.attestation.version != 6 {
+fn check_version_and_title(ctx: &PageSignerVerificationContext) -> VerificationResult {
+    if ctx.att.version != 6 {
         return Err("Version Should be 6".to_string());
     };
-    if !ctx.attestation.title.eq(&PG_SG_TITLE.to_string()) {
+    if !ctx.att.title.eq(&PG_SG_TITLE.to_string()) {
         return Err("Certificate Title verification failed".to_string());
     };
     Ok(ctx)
@@ -195,23 +193,17 @@ static ALL_SIGALGS: &[&webpki::SignatureAlgorithm] = &[
     &webpki::RSA_PKCS1_3072_8192_SHA384,
 ];
 
-fn verifyDatedCert(ctx: &PageSignerVerificationContext) -> VerificationResult {
+fn verify_dated_cert(ctx: &PageSignerVerificationContext) -> VerificationResult {
     let date_bytes = ctx
-        .attestation
+        .att
         .notarization_time
         .as_slice()
         .try_into()
         .map(|x| u64::from_be_bytes(x))
         .map_err(|_| "Failed to retieve certification date")?;
-    let d = UNIX_EPOCH + Duration::from_secs(date_bytes);
-    // Create DateTime from SystemTime
-    let datetime = DateTime::<Utc>::from(d);
-    // Formats the combined date and time with the specified format string.
-    let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S.%f").to_string();
-
-    let cert = webpki::EndEntityCert::try_from(&ctx.attestation.certificates[0][..]).unwrap();
+    let cert = webpki::EndEntityCert::try_from(&ctx.att.certificates[0][..]).unwrap();
     let intermidiates = &ctx
-        .attestation
+        .att
         .certificates
         .iter()
         .skip(1)
@@ -240,70 +232,31 @@ fn verifyDatedCert(ctx: &PageSignerVerificationContext) -> VerificationResult {
     }
 }
 
-fn verifyRSA(ctx: &PageSignerVerificationContext) -> VerificationResult {
+fn verify_rsa(ctx: &PageSignerVerificationContext) -> VerificationResult {
     let mut msg = Vec::new();
-    msg.extend_from_slice(&ctx.attestation.client_random[..]);
-    msg.extend_from_slice(&ctx.attestation.server_random[..]);
+    msg.extend_from_slice(&ctx.att.client_random[..]);
+    msg.extend_from_slice(&ctx.att.server_random[..]);
     msg.extend_from_slice(&[0x03, 0x00, 0x17, 0x41]);
-    msg.extend_from_slice(&ctx.attestation.server_pubkey_for_ecdhe);
+    msg.extend_from_slice(&ctx.att.server_pubkey_for_ecdhe);
     let cert: EndEntityCert =
-        webpki::EndEntityCert::try_from(&ctx.attestation.certificates[0][..]).unwrap();
-    cert.verify_signature(
-        &RSA_PKCS1_2048_8192_SHA256,
-        &msg,
-        &ctx.attestation.server_rsa_sig,
-    )
-    .map_err(|e| e.to_string())?;
+        webpki::EndEntityCert::try_from(&ctx.att.certificates[0][..]).unwrap();
+    cert.verify_signature(&RSA_PKCS1_2048_8192_SHA256, &msg, &ctx.att.server_rsa_sig)
+        .map_err(|e| e.to_string())?;
     Ok(ctx)
 }
 
-fn getExpandedKeys(
+fn get_expanded_keys(
     pms: &[u8],
     cr: &Vec<u8>,
     sr: &Vec<u8>,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, ring::hmac::Key) {
-    /*
-            export async function getExpandedKeys(preMasterSecret, cr, sr){
-          const Secret_CryptoKey = await crypto.subtle.importKey(
-            'raw',
-            preMasterSecret.buffer,
-            {name: 'HMAC', hash:'SHA-256'},
-            true,
-            ['sign']);
-
-          // calculate Master Secret and expanded keys
-          const seed = concatTA(str2ba('master secret'), cr, sr);
-          const a0 = seed;
-          const a1 = new Uint8Array (await crypto.subtle.sign('HMAC', Secret_CryptoKey, a0.buffer));
-          const a2 = new Uint8Array (await crypto.subtle.sign('HMAC', Secret_CryptoKey, a1.buffer));
-          const p1 = new Uint8Array (await crypto.subtle.sign('HMAC', Secret_CryptoKey, concatTA(a1, seed).buffer));
-          const p2 = new Uint8Array (await crypto.subtle.sign('HMAC', Secret_CryptoKey, concatTA(a2, seed).buffer));
-          const ms = concatTA(p1, p2).slice(0, 48);
-          const MS_CryptoKey = await crypto.subtle.importKey('raw', ms.buffer, {name: 'HMAC', hash:'SHA-256'}, true, ['sign']);
-
-          // Expand keys
-          const eseed = concatTA(str2ba('key expansion'), sr, cr);
-          const ea0 = eseed;
-          const ea1 = new Uint8Array (await crypto.subtle.sign('HMAC', MS_CryptoKey, ea0.buffer));
-          const ea2 = new Uint8Array (await crypto.subtle.sign('HMAC', MS_CryptoKey, ea1.buffer));
-          const ep1 = new Uint8Array (await crypto.subtle.sign('HMAC', MS_CryptoKey, concatTA(ea1, eseed).buffer));
-          const ep2 = new Uint8Array (await crypto.subtle.sign('HMAC', MS_CryptoKey, concatTA(ea2, eseed).buffer));
-
-          const ek = concatTA(ep1, ep2).slice(0, 40);
-          // GCM doesnt need MAC keys
-          const client_write_key = ek.slice(0, 16);
-          const server_write_key = ek.slice(16, 32);
-          const client_write_IV = ek.slice(32, 36);
-          const server_write_IV = ek.slice(36, 40);
-          return [client_write_key, server_write_key, client_write_IV, server_write_IV, MS_CryptoKey];
-    }*/
-    let secret_cryptokey = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, pms);
+    let secret_cryptokey = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &pms[..]);
     // calculate Master Secret and expanded keys
-    let mut seed = "master_secret".to_string().into_bytes();
+    let mut seed = "master secret".to_string().into_bytes();
     seed.extend_from_slice(&cr[..]);
     seed.extend_from_slice(&sr[..]);
     let a0 = seed.clone();
-    let a1 = ring::hmac::sign(&secret_cryptokey, &a0);
+    let a1 = ring::hmac::sign(&secret_cryptokey, &a0[..]);
     let a2 = ring::hmac::sign(&secret_cryptokey, a1.as_ref());
     let mut a1_seed = a1.as_ref().to_vec();
     a1_seed.extend_from_slice(&seed[..]);
@@ -313,21 +266,22 @@ fn getExpandedKeys(
     let p2 = ring::hmac::sign(&secret_cryptokey, &a2_seed);
     let mut ms = p1.as_ref().to_vec();
     ms.extend_from_slice(p2.as_ref());
-    let ms_cryptoKey = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &ms);
+    let ms = &ms[0..48];
+    let ms_crypto_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &ms);
 
     // Expand keys
     let mut eseed = "key expansion".to_string().into_bytes();
-    eseed.extend_from_slice(&cr[..]);
     eseed.extend_from_slice(&sr[..]);
-    let ea0 = eseed;
-    let ea1 = ring::hmac::sign(&ms_cryptoKey, &ea0);
-    let ea2 = ring::hmac::sign(&ms_cryptoKey, &ea1.as_ref());
+    eseed.extend_from_slice(&cr[..]);
+    let ea0 = eseed.clone();
+    let ea1 = ring::hmac::sign(&ms_crypto_key, &ea0);
+    let ea2 = ring::hmac::sign(&ms_crypto_key, &ea1.as_ref());
     let mut ea1_seed = ea1.as_ref().to_vec();
-    ea1_seed.extend_from_slice(&seed[..]);
+    ea1_seed.extend_from_slice(&eseed[..]);
     let mut ea2_seed = ea2.as_ref().to_vec();
-    ea2_seed.extend_from_slice(&seed[..]);
-    let ep1 = ring::hmac::sign(&ms_cryptoKey, &ea1_seed);
-    let ep2 = ring::hmac::sign(&ms_cryptoKey, &ea2_seed);
+    ea2_seed.extend_from_slice(&eseed[..]);
+    let ep1 = ring::hmac::sign(&ms_crypto_key, &ea1_seed);
+    let ep2 = ring::hmac::sign(&ms_crypto_key, &ea2_seed);
 
     let mut ep1 = ep1.as_ref().to_vec();
     ep1.extend_from_slice(ep2.as_ref());
@@ -341,80 +295,150 @@ fn getExpandedKeys(
         server_write_key,
         client_write_iv,
         servcer_write_iv,
-        ms_cryptoKey,
+        ms_crypto_key,
     )
 }
 
-fn verifyExpandedKeys(ctx: &PageSignerVerificationContext) -> VerificationResult {
-    // // Step 4. Combine PMS shares and derive expanded keys.
-    // const P256prime = 2n**256n - 2n**224n + 2n**192n + 2n**96n - 1n;
-    // // we may need to reduce mod prime if the sum overflows the prime
-    // const pms = int2ba((ba2int(obj['notary PMS share']) + ba2int(obj['client PMS share'])) % P256prime, 32);
-    // const [cwk, swk, civ, siv] = await getExpandedKeys(pms, cr, sr);
+fn verify_expanded_keys(ctx: &PageSignerVerificationContext) -> VerificationResult {
+    // v1 Exor v2 = v3
+    let three_xor_arr = |v1: &Vec<u8>, v2: &Vec<u8>, v3: &Vec<u8>| -> VerificationResult {
+        let v: Result<Vec<_>, _> = v1
+            .iter()
+            .zip(v2.iter())
+            .zip(v3.iter())
+            .map(|((&notary_share, &client_share), &key_share)| {
+                if notary_share ^ client_share == key_share {
+                    Ok(())
+                } else {
+                    Err("write key share verification failed")
+                }
+            })
+            .collect();
+        match v {
+            Ok(_) => Ok(ctx),
+            Err(e) => Err(e.to_string()),
+        }
+    };
 
-    // // Step 5. Check that expanded keys match key shares
-    // const clientCwkShare = obj['client client_write_key share'];
-    // const clientCivShare = obj['client client_write_iv share'];
-    // const clientSwkShare = obj['client server_write_key share'];
-    // const clientSivShare = obj['client server_write_iv share'];
-    // const notaryCwkShare = obj['notary client_write_key share'];
-    // const notaryCivShare = obj['notary client_write_iv share'];
-    // const notarySwkShare = obj['notary server_write_key share'];
-    // const notarySivShare = obj['notary server_write_iv share'];
-    // assert(eq( xor(notaryCwkShare, clientCwkShare), cwk));
-    // assert(eq( xor(notaryCivShare, clientCivShare), civ));
-    // assert(eq( xor(notarySwkShare, clientSwkShare), swk));
-    // assert(eq( xor(notarySivShare, clientSivShare), siv));
     let p256prime = BigUint::new(vec![2]).pow(256) - BigUint::new(vec![2]).pow(224)
         + BigUint::new(vec![2]).pow(192)
         + BigUint::new(vec![2]).pow(96)
         - 1 as u32;
-    let pms = (BigUint::from_bytes_be(&ctx.attestation.notary_pms_share[..])
-        + BigUint::from_bytes_be(&ctx.attestation.client_pms_share[..]))
+    let pms = (BigUint::from_bytes_be(&ctx.att.notary_pms_share[..])
+        + BigUint::from_bytes_be(&ctx.att.client_pms_share[..]))
         % p256prime;
 
-    let (cwk, swk, civ, siv, key) = getExpandedKeys(
+    let (cwk, swk, civ, siv, _key) = get_expanded_keys(
         &pms.to_bytes_be(),
-        &ctx.attestation.client_random,
-        &ctx.attestation.server_random,
+        &ctx.att.client_random,
+        &ctx.att.server_random,
     );
 
-    let v: Vec<_> = ctx
-        .attestation
-        .notary_client_write_key_share
+    three_xor_arr(
+        &ctx.att.notary_client_write_key_share,
+        &ctx.att.client_client_write_key_share,
+        &cwk,
+    )?;
+    three_xor_arr(
+        &ctx.att.notary_client_write_iv_share,
+        &ctx.att.client_client_write_iv_share,
+        &civ,
+    )?;
+
+    three_xor_arr(
+        &ctx.att.notary_server_write_key_share,
+        &ctx.att.client_server_write_key_share,
+        &swk,
+    )?;
+
+    three_xor_arr(
+        &ctx.att.notary_server_write_iv_share,
+        &ctx.att.client_server_write_iv_share,
+        &siv,
+    )?;
+
+    Ok(ctx)
+}
+
+#[allow(dead_code)]
+fn verify_session_signatures(ctx: &PageSignerVerificationContext) -> VerificationResult {
+    let mut sha_ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    ctx.att
+        .server_response_records
         .iter()
-        .zip(ctx.attestation.client_client_write_key_share.iter())
-        .zip(cwk.iter())
-        .map(|((&notary_share, &client_share), &key_share)| if notary_share ^ client_share == key_share {
-	    Ok(ctx)} else {
-	    println!("Exor failed");
-	    Err("write key share verification failed")
-	})
-        .collect();
+        .for_each(|v| sha_ctx.update(&v));
+    let commithash = sha_ctx.finish();
+    let keysharehash = {
+        let mut sha_ctx = ring::digest::Context::new(&ring::digest::SHA256);
+        sha_ctx.update(&ctx.att.client_client_write_key_share);
+        sha_ctx.update(&ctx.att.client_client_write_iv_share);
+        sha_ctx.update(&ctx.att.client_server_write_key_share);
+        sha_ctx.update(&ctx.att.client_server_write_iv_share);
+        sha_ctx.finish()
+    };
+    let pmssharehash = ring::digest::digest(&ring::digest::SHA256, &ctx.att.client_pms_share);
+    let mut tb1 = Vec::from(commithash.as_ref());
+    tb1.extend_from_slice(keysharehash.as_ref());
+    tb1.extend_from_slice(pmssharehash.as_ref());
+    tb1.extend_from_slice(&ctx.att.client_request_ciphertext);
+    tb1.extend_from_slice(&ctx.att.server_pubkey_for_ecdhe);
+    tb1.extend_from_slice(&ctx.att.notary_pms_share);
+    tb1.extend_from_slice(&ctx.att.notary_client_write_key_share);
+    tb1.extend_from_slice(&ctx.att.notary_client_write_iv_share);
+    tb1.extend_from_slice(&ctx.att.notary_server_write_key_share);
+    tb1.extend_from_slice(&ctx.att.notary_server_write_iv_share);
+    tb1.extend_from_slice(&ctx.att.notarization_time);
+    let pkey = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::ECDSA_P256_SHA256_FIXED,
+        &ctx.att.ephemeral_pubkey,
+    );
+    match pkey.verify(&tb1, &ctx.att.session_signature) {
+        Ok(_) => Ok(ctx),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn verify_ephermeral_key(ctx: &PageSignerVerificationContext) -> VerificationResult {
+    let mut tb1 = ctx.att.ephemeral_valid_from.clone();
+    tb1.extend_from_slice(&ctx.att.ephemeral_valid_until);
+    tb1.extend_from_slice(&ctx.att.ephemeral_pubkey);
     Ok(ctx)
 }
 
 fn verify_pgsg_v6<'a>(ctx: &'a PageSignerVerificationContext) -> VerificationResult<'a> {
-    checkVersionAndTitle(ctx)
-        .and_then(verifyNotary)
-        .and_then(verifyDatedCert)
-        .and_then(verifyRSA)
-        .and_then(verifyExpandedKeys)
-        .and_then(verifySessionSignatures)
-        .and_then(verifyHTTPHeaders)
-        .and_then(verifyServerAuthTags)
+    check_version_and_title(ctx)
+        .and_then(oracles::verify_notary)
+        .and_then(verify_dated_cert)
+        .and_then(verify_rsa)
+        .and_then(verify_expanded_keys)
+        .and_then(verify_session_signatures)
+        .and_then(verify_ephermeral_key)
+        .and_then(verify_http_headers)
+        .and_then(verify_server_authtags)
+}
+
+#[allow(dead_code)]
+fn verify_http_headers(_ctx: &PageSignerVerificationContext) -> VerificationResult {
+    todo!();
+}
+
+#[allow(dead_code)]
+fn verify_server_authtags(_ctx: &PageSignerVerificationContext) -> VerificationResult {
+    todo!();
 }
 
 pub fn simple_test(ctx: PageSignerVerificationContext) {
-    verifyDatedCert(&ctx).unwrap();
-    verifyRSA(&ctx).unwrap();
-    verifyExpandedKeys(&ctx).unwrap();
+    verify_dated_cert(&ctx).unwrap();
+    verify_rsa(&ctx).unwrap();
+    verify_expanded_keys(&ctx).unwrap();
+    verify_session_signatures(&ctx).unwrap();
+    verify_ephermeral_key(&ctx).unwrap();
     match verify_pgsg_v6(&ctx) {
-        Ok(c) => {
-            println!("Cert verified");
+        Ok(_c) => {
+            println!("VERIFIED:");
         }
         Err(e) => {
-            println!("Cert failed {}", e);
+            println!("FAILED: {}", e);
         }
     }
 }

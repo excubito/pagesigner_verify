@@ -1,5 +1,6 @@
 use pagesigner_verify::PageSignerAttestation;
 use pagesigner_verify::PageSignerVerificationContext;
+use pagesigner_verify::SecureEnclaveAttestation;
 use pem::parse_many;
 use pem::Pem;
 use std::fs;
@@ -10,6 +11,17 @@ fn read_pgsg(filepath: &str) -> Vec<u8> {
 
 fn get_attestation(cert_bytes: &[u8]) -> PageSignerAttestation {
     serde_json::from_slice(cert_bytes).expect("malformed json")
+}
+
+fn get_sev_attestation(att: &PageSignerAttestation) -> SecureEnclaveAttestation {
+    let mut transcript_len: [u8; 4] = [0; 4];
+    transcript_len.copy_from_slice(&att.urlfetcher_attestation[0..4]);
+    let transcript_len = u32::from_be_bytes(transcript_len);
+    let transcript = &att.urlfetcher_attestation[4..(4 + transcript_len) as usize];
+    let _attestation = &att.urlfetcher_attestation[(4 + transcript_len) as usize..];
+    //println!("{}", String::from_utf8_lossy(&transcript));
+    serde_json::from_slice::<SecureEnclaveAttestation>(transcript)
+        .expect("SEV attestation parsing failed")
 }
 
 #[allow(dead_code)]
@@ -32,16 +44,7 @@ fn read_certroot(filepath: &str) -> Result<Vec<Pem>, String> {
 fn main() {
     let cert_root = read_certroot("/home/faraz/pagesigner_verify/certs.txt").unwrap();
     let cert_bytes = read_pgsg("/home/faraz/pagesigner_verify/cert.pgsg");
-    let attestation = get_attestation(&cert_bytes);
-
-    //print the client certificates from the attestation
-    /*
-        for x in attestation.clone().certificates {
-            let p = pem::Pem {
-                tag: "CERTIFICATE".to_string(),
-                contents: x,
-            };
-            println!("{}", pem::encode(&p));
-    }*/
-    pagesigner_verify::simple_test(PageSignerVerificationContext::new(attestation, cert_root));
+    let att = get_attestation(&cert_bytes);
+    let sev_att = get_sev_attestation(&att);
+    pagesigner_verify::simple_test(PageSignerVerificationContext::new(att, sev_att, cert_root));
 }
