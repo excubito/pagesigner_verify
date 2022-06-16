@@ -1,6 +1,6 @@
-use pagesigner_verify::PageSignerAttestation;
-use pagesigner_verify::PageSignerVerificationContext;
-use pagesigner_verify::SecureEnclaveAttestation;
+use pagesigner_verify::{
+    PageSignerAttestation, PageSignerVerificationContext, SecEnclaveAttestationCtx, SecEnclaveURLS,
+};
 use pem::parse_many;
 use pem::Pem;
 use std::fs;
@@ -13,15 +13,16 @@ fn get_attestation(cert_bytes: &[u8]) -> PageSignerAttestation {
     serde_json::from_slice(cert_bytes).expect("malformed json")
 }
 
-fn get_sev_attestation(att: &PageSignerAttestation) -> SecureEnclaveAttestation {
+fn get_sev_attestation(att: &PageSignerAttestation) -> SecEnclaveAttestationCtx {
     let mut transcript_len: [u8; 4] = [0; 4];
     transcript_len.copy_from_slice(&att.urlfetcher_attestation[0..4]);
     let transcript_len = u32::from_be_bytes(transcript_len);
     let transcript = &att.urlfetcher_attestation[4..(4 + transcript_len) as usize];
-    let _attestation = &att.urlfetcher_attestation[(4 + transcript_len) as usize..];
+    let attestation = &att.urlfetcher_attestation[(4 + transcript_len) as usize..];
     //println!("{}", String::from_utf8_lossy(&transcript));
-    serde_json::from_slice::<SecureEnclaveAttestation>(transcript)
-        .expect("SEV attestation parsing failed")
+    let sev_att_urls = serde_json::from_slice::<SecEnclaveURLS>(transcript)
+        .expect("SEV attestation parsing failed");
+    SecEnclaveAttestationCtx::new(sev_att_urls, attestation.into())
 }
 
 #[allow(dead_code)]

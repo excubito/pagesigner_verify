@@ -5,7 +5,7 @@ use webpki::*;
 mod oracles;
 type BaseType = Vec<u8>;
 
-pub type SecureEnclaveAttestation = Vec<ReqResp>;
+pub type SecEnclaveURLS = Vec<ReqResp>;
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,19 +71,33 @@ pub struct PageSignerAttestation {
 
 pub struct PageSignerVerificationContext {
     att: PageSignerAttestation,
-    sev_att: SecureEnclaveAttestation,
+    sev_ctx: SecEnclaveAttestationCtx,
     cert_root: Vec<pem::Pem>,
+}
+
+pub struct SecEnclaveAttestationCtx {
+    sev_att: SecEnclaveURLS,
+    attestation: Vec<u8>,
+}
+
+impl SecEnclaveAttestationCtx {
+    pub fn new(sev_att: SecEnclaveURLS, attestation: Vec<u8>) -> Self {
+        Self {
+            sev_att,
+            attestation,
+        }
+    }
 }
 
 impl PageSignerVerificationContext {
     pub fn new(
         att: PageSignerAttestation,
-        sev_att: SecureEnclaveAttestation,
+        sev_ctx: SecEnclaveAttestationCtx,
         cert_root: Vec<pem::Pem>,
     ) -> Self {
         Self {
             att,
-            sev_att,
+            sev_ctx,
             cert_root,
         }
     }
@@ -360,7 +374,6 @@ fn verify_expanded_keys(ctx: &PageSignerVerificationContext) -> VerificationResu
     Ok(ctx)
 }
 
-#[allow(dead_code)]
 fn verify_session_signatures(ctx: &PageSignerVerificationContext) -> VerificationResult {
     let mut sha_ctx = ring::digest::Context::new(&ring::digest::SHA256);
     ctx.att
@@ -398,25 +411,6 @@ fn verify_session_signatures(ctx: &PageSignerVerificationContext) -> Verificatio
     }
 }
 
-fn verify_ephermeral_key(ctx: &PageSignerVerificationContext) -> VerificationResult {
-    let mut tb1 = ctx.att.ephemeral_valid_from.clone();
-    tb1.extend_from_slice(&ctx.att.ephemeral_valid_until);
-    tb1.extend_from_slice(&ctx.att.ephemeral_pubkey);
-    Ok(ctx)
-}
-
-fn verify_pgsg_v6<'a>(ctx: &'a PageSignerVerificationContext) -> VerificationResult<'a> {
-    check_version_and_title(ctx)
-        .and_then(oracles::verify_notary)
-        .and_then(verify_dated_cert)
-        .and_then(verify_rsa)
-        .and_then(verify_expanded_keys)
-        .and_then(verify_session_signatures)
-        .and_then(verify_ephermeral_key)
-        .and_then(verify_http_headers)
-        .and_then(verify_server_authtags)
-}
-
 #[allow(dead_code)]
 fn verify_http_headers(_ctx: &PageSignerVerificationContext) -> VerificationResult {
     todo!();
@@ -425,6 +419,25 @@ fn verify_http_headers(_ctx: &PageSignerVerificationContext) -> VerificationResu
 #[allow(dead_code)]
 fn verify_server_authtags(_ctx: &PageSignerVerificationContext) -> VerificationResult {
     todo!();
+}
+
+fn verify_ephermeral_key(ctx: &PageSignerVerificationContext) -> VerificationResult {
+    let mut tb1 = ctx.att.ephemeral_valid_from.clone();
+    tb1.extend_from_slice(&ctx.att.ephemeral_valid_until);
+    tb1.extend_from_slice(&ctx.att.ephemeral_pubkey);
+    Ok(ctx)
+}
+
+fn verify_pgsg_v6<'a>(ctx: &'a PageSignerVerificationContext) -> VerificationResult<'a> {
+    check_version_and_title(ctx)?;
+    let (ctx, oracle_pubkey) = oracles::verify_notary(ctx)?;
+    verify_dated_cert(ctx)
+        .and_then(verify_rsa)
+        .and_then(verify_expanded_keys)
+        .and_then(verify_session_signatures)
+        .and_then(verify_ephermeral_key)
+        .and_then(verify_http_headers)
+        .and_then(verify_server_authtags)
 }
 
 pub fn simple_test(ctx: PageSignerVerificationContext) {
