@@ -1,8 +1,11 @@
 use super::PageSignerVerificationContext;
 use crate::ReqResp;
+
 use chrono::DateTime;
 use chrono::FixedOffset;
+use hmac::digest::typenum::Len;
 use regex::Regex;
+use ring::signature::KeyPair;
 use std::collections::BTreeMap;
 use sxd_document::dom::Document;
 use sxd_xpath::{evaluate_xpath, Value};
@@ -610,6 +613,9 @@ pub fn verify_notary(
     check_describe_instance_attribute_kernel(&markers["DIAk"].1.unwrap().response, &instance_id)?;
     check_describe_instance_attribute_ramdisk(&markers["DIAr"].1.unwrap().response, &instance_id)?;
     check_describe_images(&markers["DImg"].1.unwrap().response, &ami_id, ROOT_OF_TRUST)?;
+
+    // TODO: verify the attestation document
+    crate::utils::verify_nitro_attestation_doc(&ctx.sev_ctx, &ctx.cert_root)?;
 
     Ok((ctx, pubkey))
 }

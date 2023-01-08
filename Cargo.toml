@@ -15,13 +15,16 @@ regex = "*"
 ring = "*"
 serde = "*"
 serde_derive = "*"
+serde_bytes = "*"
 serde_json = "*"
+serde_cbor = "*"
 sha2 = "*"
 snailquote = "*"
 sxd-document = "*"
 sxd-xpath = "*"
 wasm-bindgen = "*"
-xmltree = "*"
+x509-certificate = "*"
+cose-rust = "*"
 
 [dependencies.webpki]
 features = ["alloc"]

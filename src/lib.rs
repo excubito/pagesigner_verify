@@ -1,8 +1,10 @@
 use num_bigint::*;
+use pem::Pem;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 use webpki::*;
 mod oracles;
+mod utils;
 type BaseType = Vec<u8>;
 
 pub type SecEnclaveURLS = Vec<ReqResp>;
@@ -72,7 +74,7 @@ pub struct PageSignerAttestation {
 pub struct PageSignerVerificationContext {
     att: PageSignerAttestation,
     sev_ctx: SecEnclaveAttestationCtx,
-    cert_root: Vec<pem::Pem>,
+    cert_root: Vec<Pem>,
 }
 
 pub struct SecEnclaveAttestationCtx {
